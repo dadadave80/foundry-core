@@ -37,8 +37,9 @@ use crate::output_selection::{ContractOutputSelection, OutputSelection};
 use foundry_compilers_core::{
     error::SolcError,
     utils::{
-        BERLIN_SOLC, BYZANTIUM_SOLC, CANCUN_SOLC, CONSTANTINOPLE_SOLC, ISTANBUL_SOLC, LONDON_SOLC,
-        OSAKA_SOLC, PARIS_SOLC, PETERSBURG_SOLC, PRAGUE_SOLC, SHANGHAI_SOLC, strip_prefix_owned,
+        AMSTERDAM_SOLC, BERLIN_SOLC, BYZANTIUM_SOLC, CANCUN_SOLC, CONSTANTINOPLE_SOLC,
+        ISTANBUL_SOLC, LONDON_SOLC, OSAKA_SOLC, PARIS_SOLC, PETERSBURG_SOLC, PRAGUE_SOLC,
+        SHANGHAI_SOLC, strip_prefix_owned,
     },
 };
 pub use serde_helpers::{deserialize_bytes, deserialize_opt_bytes};
@@ -832,7 +833,7 @@ impl YulDetails {
 
 /// EVM versions.
 ///
-/// Default is `Prague`, since 0.8.30
+/// Default is `Prague`.
 ///
 /// Kept in sync with: <https://github.com/ethereum/solidity/blob/develop/liblangutil/EVMVersion.h>
 // When adding new EVM versions (see a previous attempt at https://github.com/foundry-rs/compilers/pull/51):
@@ -866,7 +867,8 @@ impl EvmVersion {
     /// Find the default EVM version for the given compiler version.
     pub fn default_version_solc(version: &Version) -> Option<Self> {
         // In most cases, Solc compilers use the highest EVM version available at the time.
-        let default = Self::default().normalize_version_solc(version)?;
+        let default = if *version >= Version::new(0, 8, 31) { Self::Osaka } else { Self::Prague }
+            .normalize_version_solc(version)?;
 
         // However, there are some exceptions where the default is lower than the highest available.
         match default {
@@ -883,8 +885,10 @@ impl EvmVersion {
                 // <https://soliditylang.org/blog/2024/01/26/solidity-0.8.24-release-announcement/>
                 Some(Self::Shanghai)
             }
-            Self::Prague if *version == Version::new(0, 8, 27) => {
-                // Prague was not set as default EVM version in 0.8.27.
+            Self::Prague
+                if *version >= Version::new(0, 8, 27) && *version < Version::new(0, 8, 30) =>
+            {
+                // Prague and Osaka support existed in this range, but the default remained Cancun.
                 Some(Self::Cancun)
             }
             _ => Some(default),
@@ -897,8 +901,9 @@ impl EvmVersion {
         (*version >= BYZANTIUM_SOLC).then(|| {
             // If the Solc version is the latest, it supports all EVM versions.
             // For all other cases, cap at the at-the-time highest possible fork.
-            if *version >= OSAKA_SOLC {
-                // Amsterdam has no dedicated solc target yet; cap at Osaka.
+            if *version >= AMSTERDAM_SOLC {
+                self
+            } else if *version >= OSAKA_SOLC {
                 self.min(Self::Osaka)
             } else if self >= Self::Prague && *version >= PRAGUE_SOLC {
                 Self::Prague
@@ -2006,6 +2011,15 @@ mod tests {
             // Cancun
             ("0.8.24", Some(EvmVersion::Shanghai)),
             ("0.8.25", Some(EvmVersion::Cancun)),
+            // Prague
+            ("0.8.27", Some(EvmVersion::Cancun)),
+            ("0.8.28", Some(EvmVersion::Cancun)),
+            // Osaka
+            ("0.8.29", Some(EvmVersion::Cancun)),
+            ("0.8.30", Some(EvmVersion::Prague)),
+            ("0.8.31", Some(EvmVersion::Osaka)),
+            // Amsterdam
+            ("0.8.36", Some(EvmVersion::Osaka)),
         ] {
             let version = Version::from_str(solc_version).unwrap();
             assert_eq!(
@@ -2065,8 +2079,10 @@ mod tests {
             ("0.8.26", EvmVersion::Prague, Some(EvmVersion::Cancun)),
             ("0.8.27", EvmVersion::Prague, Some(EvmVersion::Prague)),
             ("0.8.29", EvmVersion::Osaka, Some(EvmVersion::Osaka)),
-            // Amsterdam caps at Osaka (no dedicated solc target yet)
+            // Amsterdam caps at Osaka before 0.8.36.
             ("0.8.29", EvmVersion::Amsterdam, Some(EvmVersion::Osaka)),
+            ("0.8.35", EvmVersion::Amsterdam, Some(EvmVersion::Osaka)),
+            ("0.8.36", EvmVersion::Amsterdam, Some(EvmVersion::Amsterdam)),
         ] {
             let version = Version::from_str(solc_version).unwrap();
             assert_eq!(
