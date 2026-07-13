@@ -1,0 +1,45 @@
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  font-family:
+    system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+    sans-serif;
+  background-color: #13151b;
+  color: #f8f8f8;
+}
+
+button {
+  border: 1px solid #e1e4e8;
+  padding: 8px 12px;
+  border-radius: 4px;
+  background-color: #3a3f51;
+  color: #f8f8f8;
+  cursor: pointer;
+}
+
+button:hover {
+  background-color: #50566e;
+}
+
+select {
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid #e1e4e8;
+  background-color: #1e2026;
+  color: #f8f8f8;
+  margin-bottom: 16px;
+  cursor: pointer;
+}
+
+option {
+  background-color: #1e2026;
+  color: #f8f8f8;
+}
+
+pre {
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
