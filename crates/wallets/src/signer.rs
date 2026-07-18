@@ -356,6 +356,29 @@ impl PendingSigner {
     pub fn unlock(self) -> Result<WalletSigner> {
         match self {
             Self::Keystore(path, _) => {
+                // Fallthrough to the password prompt is always announced on stderr:
+                // a silent downgrade would hide a tampered or invalidated sidecar.
+                #[cfg(all(target_os = "macos", feature = "touch-id"))]
+                if crate::touch_id::is_enrolled(&path) {
+                    match crate::touch_id::unwrap_password(&path) {
+                        Ok(password) => match PrivateKeySigner::decrypt_keystore(&path, password) {
+                            Ok(signer) => return Ok(WalletSigner::Local(signer)),
+                            Err(alloy_signer_local::LocalSignerError::EthKeystoreError(
+                                eth_keystore::KeystoreError::MacMismatch,
+                            )) => eprintln!(
+                                "Warning: the Touch ID-stored password no longer decrypts \
+                                     this keystore (was the password changed?); falling back to \
+                                     the password prompt. Re-enroll to refresh it."
+                            ),
+                            Err(e) => return Err(WalletSignerError::Local(e)),
+                        },
+                        // E.g. cancelled prompt, headless session, or invalidated key.
+                        Err(e) => eprintln!(
+                            "Warning: Touch ID unlock failed ({e}); falling back to the \
+                             password prompt."
+                        ),
+                    }
+                }
                 let password = rpassword::prompt_password("Enter keystore password:")?;
                 match PrivateKeySigner::decrypt_keystore(path, password) {
                     Ok(signer) => Ok(WalletSigner::Local(signer)),

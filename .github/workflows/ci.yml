@@ -90,10 +90,16 @@ jobs:
         run: git diff --exit-code -- crates/wallets/src/wallet_browser/app/assets
 
   clippy:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS covers the target-gated `touch-id` code, which the Linux leg
+        # never compiles.
+        os: ["ubuntu-latest", "macos-latest"]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
