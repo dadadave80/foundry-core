@@ -2,6 +2,11 @@ use std::{env, path::PathBuf, process::Command};
 
 const XCODE_HINT: &str = "the touch-id feature requires the Xcode command line tools";
 
+/// Oldest Swift toolchain the shim is known to link with, kept honest by the
+/// oldest-supported leg of the `touch-id-link` CI job. Swift 5.9
+/// ships with Xcode / Command Line Tools 15.0.
+const MIN_SWIFT: (u32, u32) = (5, 9);
+
 fn main() {
     println!("cargo::rerun-if-changed=src/touch_id/shim.swift");
     println!("cargo::rerun-if-env-changed=SDKROOT");
@@ -13,6 +18,8 @@ fn main() {
     {
         return;
     }
+
+    check_swift_version();
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     // Apple Silicon, plus Intel Macs whose T2 chip provides a Secure Enclave.
@@ -55,6 +62,32 @@ fn main() {
          cannot locate the Swift compatibility archives",
     );
     println!("cargo::rustc-link-search=native={path}/macosx");
+}
+
+/// Rejects toolchains older than [`MIN_SWIFT`] before compiling anything,
+/// turning an opaque failure inside Apple `ld` into an actionable error.
+/// Gated on `swiftc` rather than `xcodebuild` because Command Line Tools-only
+/// installs have no `xcodebuild`, and both toolchain flavors print
+/// "Swift version X.Y".
+fn check_swift_version() {
+    let out = run_stdout(Command::new("swiftc").arg("--version"));
+    let ver =
+        out.split("Swift version ").nth(1).and_then(|s| s.split_whitespace().next()).unwrap_or("");
+    assert!(
+        !ver.is_empty(),
+        "could not parse `swiftc --version` output ({}); {XCODE_HINT}",
+        out.trim()
+    );
+    let mut parts = ver.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+    let found = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    assert!(
+        found >= MIN_SWIFT,
+        "the touch-id feature requires Swift {}.{} or newer (Xcode/Command Line Tools \
+         15.0 or newer); found Swift {ver}. Update Xcode, select a newer install \
+         with `sudo xcode-select -s`, or build without `--features touch-id`",
+        MIN_SWIFT.0,
+        MIN_SWIFT.1,
+    );
 }
 
 fn run(cmd: &mut Command) {
