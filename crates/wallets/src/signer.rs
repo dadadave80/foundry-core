@@ -356,13 +356,20 @@ impl PendingSigner {
     pub fn unlock(self) -> Result<WalletSigner> {
         match self {
             Self::Keystore(path, _) => {
-                // Fallthrough to the password prompt is always announced on stderr:
-                // a silent downgrade would hide a tampered or invalidated sidecar.
+                // Falling back to the password prompt is reserved for recoverable
+                // situations — a headless session, or a wrapped password made stale
+                // by a keystore password change — and is always announced on
+                // stderr. Everything else aborts: a canceled Touch ID prompt must
+                // not degrade into a password prompt, and a corrupt or invalidated
+                // sidecar needs an explicit re-enroll/remove decision rather than
+                // a downgrade an attacker could induce.
                 #[cfg(all(target_os = "macos", feature = "touch-id"))]
                 if crate::touch_id::is_enrolled(&path) {
                     match crate::touch_id::unwrap_password(&path) {
                         Ok(password) => match PrivateKeySigner::decrypt_keystore(&path, password) {
                             Ok(signer) => return Ok(WalletSigner::Local(signer)),
+                            // Stale wrap: the keystore password changed after
+                            // enrollment, so the prompt can still succeed.
                             Err(alloy_signer_local::LocalSignerError::EthKeystoreError(
                                 eth_keystore::KeystoreError::MacMismatch,
                             )) => eprintln!(
@@ -372,11 +379,10 @@ impl PendingSigner {
                             ),
                             Err(e) => return Err(WalletSignerError::Local(e)),
                         },
-                        // E.g. cancelled prompt, headless session, or invalidated key.
-                        Err(e) => eprintln!(
-                            "Warning: Touch ID unlock failed ({e}); falling back to the \
-                             password prompt."
-                        ),
+                        Err(e) if e.is_recoverable() => {
+                            eprintln!("Warning: {e}; falling back to the password prompt.")
+                        }
+                        Err(e) => return Err(e.into()),
                     }
                 }
                 let password = rpassword::prompt_password("Enter keystore password:")?;

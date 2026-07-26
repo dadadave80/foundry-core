@@ -11,13 +11,20 @@
 //! items require provisioning-profile entitlements that a plain CLI cannot carry,
 //! and file-based keychain ACLs break on every binary upgrade. The Secure Enclave
 //! blob is device-bound; a Mac migration or (under [`Policy::CurrentBiometry`])
-//! a biometric re-enrollment invalidates it, after which the password prompt is
-//! the fallback and re-enrollment recreates the sidecar.
+//! a biometric re-enrollment invalidates it.
+//!
+//! Failures are structured so callers can tell user intent from environment:
+//! [`TouchIdError::Canceled`] means the user declined and must abort rather than
+//! degrade into a password prompt, [`TouchIdError::Unavailable`] means
+//! authentication cannot happen right now (headless session, no enclave) and is
+//! the only case where falling back to the prompt is appropriate, and an
+//! invalidated or corrupt sidecar is a hard error that requires an explicit
+//! re-enroll or removal.
 
 use std::{
     ffi::CString,
     fs,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
 
@@ -30,46 +37,104 @@ const SIDECAR_EXT: &str = "touchid";
 const SIDECAR_VERSION: u32 = 1;
 
 /// Access-control policy for the Secure Enclave wrap key.
+///
+/// Every public policy requires user presence; a wrap key that unwraps without
+/// any user interaction would defeat the purpose of enrollment.
 // kebab-case so the persisted values match a future clap `ValueEnum` policy flag.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Policy {
-    /// No user interaction; the secret is only bound to this device's Secure Enclave.
-    DeviceOnly,
     /// Touch ID, with device password fallback.
     #[default]
     UserPresence,
     /// Strictly the currently enrolled biometrics; re-enrollment invalidates the key.
     CurrentBiometry,
+    /// No user interaction; the secret is only bound to this device's Secure
+    /// Enclave. Test-only: it lets CI exercise the full create/wrap/unwrap FFI
+    /// path non-interactively, and release builds reject `device-only` sidecars
+    /// at parse time.
+    #[cfg(test)]
+    DeviceOnly,
 }
 
 impl Policy {
+    /// Raw value shared with the `policy*` constants in `shim.swift`.
     const fn raw(self) -> i32 {
         match self {
-            Self::DeviceOnly => 0,
             Self::UserPresence => 1,
             Self::CurrentBiometry => 2,
+            #[cfg(test)]
+            Self::DeviceOnly => 0,
         }
     }
 }
 
 /// Errors produced by Touch ID keystore enrollment and unlocking.
+///
+/// Only [`TouchIdError::NotEnrolled`] and [`TouchIdError::Unavailable`] are
+/// recoverable by falling back to the interactive password prompt; every other
+/// variant is either an explicit user decision ([`TouchIdError::Canceled`]) or
+/// a sidecar that must be re-enrolled or removed before unlocking proceeds.
 #[derive(Debug, thiserror::Error)]
 pub enum TouchIdError {
     #[error("keystore is not enrolled for Touch ID unlock")]
     NotEnrolled,
-    #[error("unsupported Touch ID sidecar version {0}; re-enroll this keystore to regenerate it")]
+    #[error(
+        "unsupported Touch ID sidecar version {0}; re-enroll this keystore to regenerate it, \
+         or delete its `.touchid` sidecar to use the password prompt"
+    )]
     UnsupportedVersion(u32),
+    /// The user dismissed the authentication prompt.
+    #[error("Touch ID authentication was canceled")]
+    Canceled,
+    /// Authentication cannot happen in this environment (headless session, no
+    /// Secure Enclave, no enrolled biometrics or passcode).
+    #[error("Touch ID authentication is unavailable: {0}")]
+    Unavailable(String),
+    /// Authentication succeeded but the enclave rejected the wrap key: the
+    /// enrollment no longer matches this device's state (e.g. a
+    /// [`Policy::CurrentBiometry`] key after biometric re-enrollment).
+    #[error(
+        "the Secure Enclave key for this keystore was invalidated ({0}); re-enroll this \
+         keystore, or delete its `.touchid` sidecar to use the password prompt"
+    )]
+    Invalidated(String),
+    /// The sidecar's key blob or sealed password failed to decode or
+    /// authenticate: it was tampered with, truncated, or copied from another Mac.
+    #[error(
+        "corrupt Touch ID sidecar ({0}); re-enroll this keystore, or delete its `.touchid` \
+         sidecar to use the password prompt"
+    )]
+    CorruptSidecar(String),
     #[error("Secure Enclave: {0}")]
     SecureEnclave(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
-    #[error("invalid Touch ID sidecar: {0}")]
+    #[error(
+        "invalid Touch ID sidecar: {0}; re-enroll this keystore, or delete its `.touchid` \
+         sidecar to use the password prompt"
+    )]
     InvalidSidecar(#[from] serde_json::Error),
-    #[error("invalid hex in Touch ID sidecar: {0}")]
+    #[error(
+        "invalid hex in Touch ID sidecar: {0}; re-enroll this keystore, or delete its \
+         `.touchid` sidecar to use the password prompt"
+    )]
     InvalidHex(#[from] hex::FromHexError),
     #[error("unwrapped password is not valid UTF-8")]
     InvalidPassword,
+}
+
+impl TouchIdError {
+    /// Whether falling back to the interactive password prompt is an
+    /// appropriate response to this error.
+    ///
+    /// Cancellation must abort — the user said no, and a prompt would let a
+    /// wrapper script capture the password anyway — and invalidated or corrupt
+    /// sidecars require an explicit re-enroll/remove decision rather than a
+    /// downgrade an attacker could induce.
+    pub const fn is_recoverable(&self) -> bool {
+        matches!(self, Self::NotEnrolled | Self::Unavailable(_))
+    }
 }
 
 /// Sidecar file contents: the enclave key and the password it wraps.
@@ -99,11 +164,21 @@ unsafe extern "C" {
         blob_len: usize,
         sealed: *const u8,
         sealed_len: usize,
+        policy: i32,
         reason: *const std::ffi::c_char,
         out: *mut *mut u8,
         out_len: *mut usize,
     ) -> i32;
     fn foundry_se_free(ptr: *mut u8, len: usize);
+}
+
+/// Status codes shared with the `status*` constants in `shim.swift`.
+mod status {
+    pub(super) const OK: i32 = 0;
+    pub(super) const CANCELED: i32 = 2;
+    pub(super) const UNAVAILABLE: i32 = 3;
+    pub(super) const INVALIDATED: i32 = 4;
+    pub(super) const INVALID_DATA: i32 = 5;
 }
 
 /// Copies out a shim result buffer, frees it, and interprets it as data or an
@@ -125,11 +200,17 @@ unsafe fn shim_result(status: i32, ptr: *mut u8, len: usize) -> Result<Vec<u8>, 
             bytes
         }
     };
-    if status == 0 {
-        Ok(bytes)
-    } else {
-        Err(TouchIdError::SecureEnclave(String::from_utf8_lossy(&bytes).into_owned()))
+    if status == status::OK {
+        return Ok(bytes);
     }
+    let message = String::from_utf8_lossy(&bytes).into_owned();
+    Err(match status {
+        status::CANCELED => TouchIdError::Canceled,
+        status::UNAVAILABLE => TouchIdError::Unavailable(message),
+        status::INVALIDATED => TouchIdError::Invalidated(message),
+        status::INVALID_DATA => TouchIdError::CorruptSidecar(message),
+        _ => TouchIdError::SecureEnclave(message),
+    })
 }
 
 /// Whether this machine has a usable Secure Enclave.
@@ -183,15 +264,29 @@ pub fn enroll(keystore: &Path, password: &str, policy: Policy) -> Result<(), Tou
         se_key: hex::encode(se_key),
         sealed_password: hex::encode(sealed_password),
     };
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(sidecar_path(keystore))?;
-    // `mode` only applies on creation; re-enrollment must also repair permissions.
-    file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    serde_json::to_writer_pretty(&mut file, &sidecar).map_err(std::io::Error::from)?;
+    write_sidecar(keystore, &sidecar)
+}
+
+/// Serializes `sidecar` and atomically replaces the keystore's sidecar file.
+///
+/// The contents are written to a fresh `0600` temporary file in the sidecar's
+/// directory and renamed into place. The rename replaces whatever occupies the
+/// sidecar path — including a symlink, which an open-and-truncate would have
+/// followed, letting a malicious `foo.touchid -> foo` link clobber the keystore
+/// itself. It also means a crash can never leave a truncated sidecar behind,
+/// and that re-enrollment repairs loosened file permissions, since the fresh
+/// file's `0600` travels with the rename.
+fn write_sidecar(keystore: &Path, sidecar: &Sidecar) -> Result<(), TouchIdError> {
+    let path = sidecar_path(keystore);
+    let dir = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let mut tmp =
+        tempfile::Builder::new().permissions(fs::Permissions::from_mode(0o600)).tempfile_in(dir)?;
+    serde_json::to_writer_pretty(tmp.as_file_mut(), sidecar).map_err(std::io::Error::from)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(&path).map_err(|e| e.error)?;
     Ok(())
 }
 
@@ -227,6 +322,7 @@ pub fn unwrap_password(keystore: &Path) -> Result<String, TouchIdError> {
             se_key.len(),
             sealed.as_ptr(),
             sealed.len(),
+            sidecar.policy.raw(),
             reason.as_ptr(),
             &raw mut ptr,
             &raw mut len,
@@ -262,6 +358,51 @@ mod tests {
         );
     }
 
+    /// Regression test: a sidecar symlink pointing at the keystore must not let
+    /// the sidecar write follow it and destroy the keystore.
+    #[test]
+    fn sidecar_write_replaces_symlink_instead_of_following_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let keystore = dir.path().join("deployer");
+        fs::write(&keystore, "{}").unwrap();
+        std::os::unix::fs::symlink(&keystore, sidecar_path(&keystore)).unwrap();
+
+        let sidecar = Sidecar {
+            version: SIDECAR_VERSION,
+            policy: Policy::UserPresence,
+            se_key: String::new(),
+            sealed_password: String::new(),
+        };
+        write_sidecar(&keystore, &sidecar).unwrap();
+
+        // The keystore is untouched, and the sidecar path now holds a regular
+        // 0600 file rather than the symlink.
+        assert_eq!(fs::read_to_string(&keystore).unwrap(), "{}");
+        let meta = fs::symlink_metadata(sidecar_path(&keystore)).unwrap();
+        assert!(meta.is_file());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    }
+
+    /// Re-enrollment must tighten a sidecar whose mode was loosened.
+    #[test]
+    fn sidecar_write_repairs_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let keystore = dir.path().join("deployer");
+        fs::write(&keystore, "{}").unwrap();
+        let sidecar = Sidecar {
+            version: SIDECAR_VERSION,
+            policy: Policy::UserPresence,
+            se_key: String::new(),
+            sealed_password: String::new(),
+        };
+        write_sidecar(&keystore, &sidecar).unwrap();
+        fs::set_permissions(sidecar_path(&keystore), fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_sidecar(&keystore, &sidecar).unwrap();
+        let meta = fs::metadata(sidecar_path(&keystore)).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    }
+
     #[test]
     fn enroll_and_unwrap_device_only_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
@@ -278,7 +419,7 @@ mod tests {
             Ok(()) => {}
             // VMs and CI runners have no usable Secure Enclave; require the
             // hardware path only when explicitly opted in.
-            Err(TouchIdError::SecureEnclave(e))
+            Err(TouchIdError::Unavailable(e) | TouchIdError::SecureEnclave(e))
                 if std::env::var_os("FOUNDRY_TOUCH_ID_TESTS").is_none() =>
             {
                 eprintln!("skipping Secure Enclave roundtrip: {e}");

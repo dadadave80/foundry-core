@@ -65,6 +65,9 @@ pub enum WalletSignerError {
     #[cfg(feature = "browser")]
     Browser(#[from] BrowserWalletError),
     #[error(transparent)]
+    #[cfg(all(target_os = "macos", feature = "touch-id"))]
+    TouchId(#[from] crate::touch_id::TouchIdError),
+    #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
     InvalidHex(#[from] FromHexError),
