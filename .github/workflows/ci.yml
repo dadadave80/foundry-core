@@ -115,13 +115,18 @@ jobs:
           RUSTFLAGS: -Dwarnings
 
   # The `touch-id` Swift shim must compile and link for both shipped Apple
-  # targets, but the host-arch test leg only ever links one of them. Build the
-  # wallet test binaries for each target explicitly: `--no-run` still performs
-  # the final binary link (Swift static lib, runtime search paths, framework
-  # autolinking), which `cargo check`/`clippy` never exercise, while the
-  # x86_64 binaries simply aren't executed on the arm64 runner.
+  # targets, on both the oldest supported toolchain and the latest — the
+  # host-arch test leg only ever links one combination. `--no-run` still
+  # performs the final binary link (Swift static lib, runtime search paths,
+  # framework autolinking), which `cargo check`/`clippy` never exercise, while
+  # the x86_64 binaries simply aren't executed on the arm64 runners.
+  #
+  # The oldest leg pins the documented toolchain floor (Xcode 15.0.1,
+  # Swift 5.9 — see `MIN_SWIFT` in crates/wallets/build.rs).
+  # If the runner image drops that Xcode, the pin step fails loudly so the
+  # floor is re-evaluated instead of silently sliding forward.
   touch-id-link:
-    runs-on: macos-latest
+    runs-on: ${{ matrix.toolchain.os }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -129,16 +134,31 @@ jobs:
       fail-fast: false
       matrix:
         target: ["x86_64-apple-darwin", "aarch64-apple-darwin"]
+        toolchain:
+          - { xcode: "15.0.1", os: "macos-14" }
+          - { xcode: "latest", os: "macos-latest" }
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+      - name: pin oldest supported Xcode
+        if: matrix.toolchain.xcode != 'latest'
+        run: |
+          app="/Applications/Xcode_${{ matrix.toolchain.xcode }}.app"
+          if [ ! -d "$app" ]; then
+            echo "::error::runner image no longer ships Xcode ${{ matrix.toolchain.xcode }}; re-evaluate the documented touch-id toolchain floor (MIN_SWIFT in crates/wallets/build.rs)"
+            exit 1
+          fi
+          echo "DEVELOPER_DIR=$app/Contents/Developer" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # master
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
       - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: ${{ matrix.toolchain.xcode }}
+      - run: swiftc --version
       - name: compile and link touch-id test binaries
         run: cargo test -p foundry-wallets --features touch-id --target ${{ matrix.target }} --no-run
 
