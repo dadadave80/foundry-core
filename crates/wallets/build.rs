@@ -4,7 +4,7 @@ const XCODE_HINT: &str = "the touch-id feature requires the Xcode command line t
 
 /// Oldest Swift toolchain the shim is known to link with, kept honest by the
 /// oldest-supported leg of the `touch-id-link` CI job. Swift 5.9
-/// ships with Xcode / Command Line Tools 15.0.
+/// ships with Xcode / Command Line Tools 15.0.1.
 const MIN_SWIFT: (u32, u32) = (5, 9);
 
 fn main() {
@@ -83,7 +83,7 @@ fn check_swift_version() {
     assert!(
         found >= MIN_SWIFT,
         "the touch-id feature requires Swift {}.{} or newer (Xcode/Command Line Tools \
-         15.0 or newer); found Swift {ver}. Update Xcode, select a newer install \
+         15.0.1 or newer); found Swift {ver}. Update Xcode, select a newer install \
          with `sudo xcode-select -s`, or build without `--features touch-id`",
         MIN_SWIFT.0,
         MIN_SWIFT.1,

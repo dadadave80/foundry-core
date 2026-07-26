@@ -17,4 +17,4 @@ Supports multiple signer backends:
 - `aws-kms`: [AWS KMS](https://aws.amazon.com/kms/) signer support via [`alloy-signer-aws`](https://docs.rs/alloy-signer-aws).
 - `gcp-kms`: [GCP KMS](https://cloud.google.com/kms) signer support via [`alloy-signer-gcp`](https://docs.rs/alloy-signer-gcp).
 - `turnkey`: [Turnkey](https://www.turnkey.com) signer support via [`alloy-signer-turnkey`](https://docs.rs/alloy-signer-turnkey).
-- `touch-id`: Touch ID (Secure Enclave) keystore unlock on macOS. Compiles a Swift shim at build time; no effect on other targets. Building requires Xcode or the Command Line Tools 15.0 or newer (Swift 5.9+) — older toolchains are rejected by the build script with a clear error. At runtime the feature needs macOS 11 or newer on a Mac with a Secure Enclave.
+- `touch-id`: Touch ID (Secure Enclave) keystore unlock on macOS. Compiles a Swift shim at build time; no effect on other targets. Building requires Xcode or the Command Line Tools 15.0.1 or newer (Swift 5.9+) — older toolchains are rejected by the build script with a clear error. At runtime the feature needs macOS 11 or newer on a Mac with a Secure Enclave.
