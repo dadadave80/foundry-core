@@ -302,6 +302,7 @@ jobs:
       - rustfmt
       - browser-wallet
       - clippy
+      - touch-id-link
       - feature-checks
       - test
       - doctest
