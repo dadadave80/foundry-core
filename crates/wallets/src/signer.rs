@@ -363,23 +363,31 @@ impl PendingSigner {
                 #[cfg(all(target_os = "macos", feature = "touch-id"))]
                 if crate::touch_id::is_enrolled(&path) {
                     match crate::touch_id::unwrap_password(&path) {
-                        Ok(password) => match PrivateKeySigner::decrypt_keystore(&path, password) {
-                            Ok(signer) => return checked_keystore_signer(signer, expected_address),
-                            Err(alloy_signer_local::LocalSignerError::EthKeystoreError(
-                                eth_keystore::KeystoreError::MacMismatch,
-                            )) => {
-                                return Err(crate::touch_id::TouchIdError::PasswordMismatch.into());
+                        Ok(password) => {
+                            match PrivateKeySigner::decrypt_keystore(&path, password.as_str()) {
+                                Ok(signer) => {
+                                    return checked_keystore_signer(signer, expected_address);
+                                }
+                                Err(alloy_signer_local::LocalSignerError::EthKeystoreError(
+                                    eth_keystore::KeystoreError::MacMismatch,
+                                )) => {
+                                    return Err(
+                                        crate::touch_id::TouchIdError::PasswordMismatch.into()
+                                    );
+                                }
+                                Err(e) => return Err(WalletSignerError::Local(e)),
                             }
-                            Err(e) => return Err(WalletSignerError::Local(e)),
-                        },
+                        }
                         Err(e) if e.is_recoverable() => {
                             eprintln!("Warning: {e}; falling back to the password prompt.")
                         }
                         Err(e) => return Err(e.into()),
                     }
                 }
-                let password = rpassword::prompt_password("Enter keystore password:")?;
-                match PrivateKeySigner::decrypt_keystore(path, password) {
+                let password = zeroize::Zeroizing::new(rpassword::prompt_password(
+                    "Enter keystore password:",
+                )?);
+                match PrivateKeySigner::decrypt_keystore(path, password.as_str()) {
                     Ok(signer) => checked_keystore_signer(signer, expected_address),
                     Err(e) => match e {
                         // Catch the `MacMismatch` error, which indicates an incorrect password and

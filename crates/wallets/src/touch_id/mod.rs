@@ -30,6 +30,7 @@ use std::{
 
 use alloy_primitives::hex;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 /// Extension of the sidecar file stored next to the keystore JSON.
 const SIDECAR_EXT: &str = "touchid";
@@ -302,7 +303,11 @@ fn write_sidecar(keystore: &Path, sidecar: &Sidecar) -> Result<(), TouchIdError>
 
 /// Unwraps the keystore password from the sidecar, triggering the enclave's
 /// access-control prompt (Touch ID under the default policy).
-pub fn unwrap_password(keystore: &Path) -> Result<String, TouchIdError> {
+///
+/// Blocks the calling thread until the prompt resolves; the authentication UI
+/// runs out of process, so calling from any CLI thread is fine. The returned
+/// password and the intermediate buffer are zeroed on drop.
+pub fn unwrap_password(keystore: &Path) -> Result<Zeroizing<String>, TouchIdError> {
     let path = sidecar_path(keystore);
     if !path.exists() {
         return Err(TouchIdError::NotEnrolled);
@@ -339,8 +344,9 @@ pub fn unwrap_password(keystore: &Path) -> Result<String, TouchIdError> {
         )
     };
     // SAFETY: `(ptr, len)` were just written by `foundry_se_unwrap` and not yet freed.
-    let password = unsafe { shim_result(status, ptr, len) }?;
-    String::from_utf8(password).map_err(|_| TouchIdError::InvalidPassword)
+    let bytes = Zeroizing::new(unsafe { shim_result(status, ptr, len) }?);
+    let password = std::str::from_utf8(&bytes).map_err(|_| TouchIdError::InvalidPassword)?;
+    Ok(Zeroizing::new(password.to_string()))
 }
 
 /// Removes the keystore's sidecar, if any. Returns whether one existed.
@@ -444,7 +450,7 @@ mod tests {
             Err(e) => panic!("enroll failed: {e}"),
         }
         assert!(is_enrolled(&keystore));
-        assert_eq!(unwrap_password(&keystore).unwrap(), "hunter2");
+        assert_eq!(*unwrap_password(&keystore).unwrap(), "hunter2");
 
         assert!(remove(&keystore).unwrap());
         assert!(!is_enrolled(&keystore));
@@ -473,6 +479,6 @@ mod tests {
         let keystore = dir.path().join("deployer");
         fs::write(&keystore, "{}").unwrap();
         enroll(&keystore, "hunter2", Policy::UserPresence).unwrap();
-        assert_eq!(unwrap_password(&keystore).unwrap(), "hunter2");
+        assert_eq!(*unwrap_password(&keystore).unwrap(), "hunter2");
     }
 }
