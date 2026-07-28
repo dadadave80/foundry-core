@@ -100,6 +100,8 @@ private func classify(_ error: Error) -> ShimError {
         switch code {
         case .userCancel, .appCancel, .systemCancel:
             return ShimError(status: statusCanceled, message: "authentication was canceled")
+        case .authenticationFailed:
+            return ShimError(status: statusFailure, message: "authentication failed")
         case .biometryLockout:
             return ShimError(status: statusLockedOut, message: ns.localizedDescription)
         case .passcodeNotSet, .biometryNotAvailable, .biometryNotEnrolled, .notInteractive:
@@ -226,7 +228,8 @@ public func foundrySeUnwrap(
     guard sealedLen >= x963PublicKeyLen + chaChaPolyOverheadLen else {
         return fail(statusInvalidData, "sealed data is truncated", outPtr, outLen)
     }
-    let reason = reasonPtr.map { String(cString: $0) } ?? "unlock the keystore"
+    var reason = reasonPtr.map { String(cString: $0) } ?? "unlock the keystore"
+    if reason.isEmpty { reason = "unlock the keystore" }
     let context = LAContext()
     // Also shown if the enclave ever drives its own prompt (e.g. re-evaluation).
     context.localizedReason = reason

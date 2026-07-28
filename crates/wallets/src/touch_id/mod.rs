@@ -30,6 +30,7 @@ use std::{
 
 use alloy_primitives::hex;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 /// Extension of the sidecar file stored next to the keystore JSON.
 const SIDECAR_EXT: &str = "touchid";
@@ -43,6 +44,7 @@ const SIDECAR_VERSION: u32 = 1;
 // kebab-case so the persisted values match a future clap `ValueEnum` policy flag.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum Policy {
     /// Touch ID, with device password fallback.
     #[default]
@@ -76,6 +78,7 @@ impl Policy {
 /// variant is either an explicit user decision ([`TouchIdError::Canceled`]) or
 /// a sidecar that must be re-enrolled or removed before unlocking proceeds.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum TouchIdError {
     #[error("keystore is not enrolled for Touch ID unlock")]
     NotEnrolled,
@@ -116,8 +119,8 @@ pub enum TouchIdError {
     PasswordMismatch,
     #[error("Secure Enclave: {0}")]
     SecureEnclave(String),
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
+    #[error("failed to access the Touch ID sidecar at `{path}`: {source}")]
+    SidecarIo { path: PathBuf, source: std::io::Error },
     #[error(
         "invalid Touch ID sidecar: {0}; re-enroll this keystore, or delete its `.touchid` \
          sidecar to use the password prompt"
@@ -146,7 +149,7 @@ impl TouchIdError {
 }
 
 /// Sidecar file contents: the enclave key and the password it wraps.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Sidecar {
     version: u32,
     policy: Policy,
@@ -245,7 +248,9 @@ pub fn is_enrolled(keystore: &Path) -> bool {
 /// Enrolls a keystore: creates a Secure Enclave wrap key under `policy` and stores
 /// the wrapped `password` in the sidecar file, replacing any existing sidecar (the
 /// previous wrap key and its policy are discarded). The caller is responsible for
-/// having verified that `password` decrypts the keystore.
+/// having verified that `password` decrypts the keystore: unlocking treats a
+/// wrapped password that fails to decrypt as tampering and aborts with
+/// [`TouchIdError::PasswordMismatch`] instead of falling back to the prompt.
 pub fn enroll(keystore: &Path, password: &str, policy: Policy) -> Result<(), TouchIdError> {
     let (mut ptr, mut len) = (std::ptr::null_mut(), 0);
     // SAFETY: the out parameters are valid for writes.
@@ -275,6 +280,7 @@ pub fn enroll(keystore: &Path, password: &str, policy: Policy) -> Result<(), Tou
         sealed_password: hex::encode(sealed_password),
     };
     write_sidecar(keystore, &sidecar)
+        .map_err(|source| TouchIdError::SidecarIo { path: sidecar_path(keystore), source })
 }
 
 /// Serializes `sidecar` and atomically replaces the keystore's sidecar file.
@@ -286,7 +292,7 @@ pub fn enroll(keystore: &Path, password: &str, policy: Policy) -> Result<(), Tou
 /// itself. It also means a crash can never leave a truncated sidecar behind,
 /// and that re-enrollment repairs loosened file permissions, since the fresh
 /// file's `0600` travels with the rename.
-fn write_sidecar(keystore: &Path, sidecar: &Sidecar) -> Result<(), TouchIdError> {
+fn write_sidecar(keystore: &Path, sidecar: &Sidecar) -> std::io::Result<()> {
     let path = sidecar_path(keystore);
     let dir = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
@@ -302,12 +308,17 @@ fn write_sidecar(keystore: &Path, sidecar: &Sidecar) -> Result<(), TouchIdError>
 
 /// Unwraps the keystore password from the sidecar, triggering the enclave's
 /// access-control prompt (Touch ID under the default policy).
-pub fn unwrap_password(keystore: &Path) -> Result<String, TouchIdError> {
+///
+/// Blocks the calling thread until the prompt resolves; the authentication UI
+/// runs out of process, so calling from any CLI thread is fine. The returned
+/// password and the intermediate buffer are zeroed on drop.
+pub fn unwrap_password(keystore: &Path) -> Result<Zeroizing<String>, TouchIdError> {
     let path = sidecar_path(keystore);
     if !path.exists() {
         return Err(TouchIdError::NotEnrolled);
     }
-    let raw = fs::read_to_string(path)?;
+    let raw =
+        fs::read_to_string(&path).map_err(|source| TouchIdError::SidecarIo { path, source })?;
     // Gate on the version before parsing the full schema, so a future format's
     // sidecar reports its version instead of a schema mismatch.
     #[derive(Deserialize)]
@@ -339,15 +350,16 @@ pub fn unwrap_password(keystore: &Path) -> Result<String, TouchIdError> {
         )
     };
     // SAFETY: `(ptr, len)` were just written by `foundry_se_unwrap` and not yet freed.
-    let password = unsafe { shim_result(status, ptr, len) }?;
-    String::from_utf8(password).map_err(|_| TouchIdError::InvalidPassword)
+    let bytes = Zeroizing::new(unsafe { shim_result(status, ptr, len) }?);
+    let password = std::str::from_utf8(&bytes).map_err(|_| TouchIdError::InvalidPassword)?;
+    Ok(Zeroizing::new(password.to_string()))
 }
 
 /// Removes the keystore's sidecar, if any. Returns whether one existed.
 pub fn remove(keystore: &Path) -> Result<bool, TouchIdError> {
     let path = sidecar_path(keystore);
     if path.exists() {
-        fs::remove_file(path)?;
+        fs::remove_file(&path).map_err(|source| TouchIdError::SidecarIo { path, source })?;
         Ok(true)
     } else {
         Ok(false)
@@ -362,6 +374,56 @@ mod tests {
     fn lockout_and_password_mismatch_do_not_fall_back() {
         assert!(!TouchIdError::LockedOut("locked".into()).is_recoverable());
         assert!(!TouchIdError::PasswordMismatch.is_recoverable());
+    }
+
+    #[test]
+    fn policy_wire_format_is_stable() {
+        assert_eq!(serde_json::to_string(&Policy::UserPresence).unwrap(), "\"user-presence\"");
+        assert_eq!(
+            serde_json::to_string(&Policy::CurrentBiometry).unwrap(),
+            "\"current-biometry\""
+        );
+        assert_eq!(
+            serde_json::from_str::<Policy>("\"user-presence\"").unwrap(),
+            Policy::UserPresence
+        );
+    }
+
+    /// The sidecar is a persistent on-disk format; lock its field names and
+    /// order against accidental rename refactors.
+    #[test]
+    fn sidecar_wire_format_is_stable() {
+        let sidecar = Sidecar {
+            version: SIDECAR_VERSION,
+            policy: Policy::UserPresence,
+            se_key: "aa".into(),
+            sealed_password: "bb".into(),
+        };
+        let json = serde_json::to_string(&sidecar).unwrap();
+        assert_eq!(
+            json,
+            r#"{"version":1,"policy":"user-presence","se_key":"aa","sealed_password":"bb"}"#
+        );
+        assert_eq!(serde_json::from_str::<Sidecar>(&json).unwrap(), sidecar);
+    }
+
+    /// Corrupt sidecars must surface structured errors without touching the
+    /// enclave, so these paths are testable on any machine.
+    #[test]
+    fn corrupt_sidecars_report_structured_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let keystore = dir.path().join("k");
+        fs::write(&keystore, "{}").unwrap();
+
+        fs::write(sidecar_path(&keystore), "not json").unwrap();
+        assert!(matches!(unwrap_password(&keystore), Err(TouchIdError::InvalidSidecar(_))));
+
+        fs::write(
+            sidecar_path(&keystore),
+            r#"{"version":1,"policy":"user-presence","se_key":"zz","sealed_password":"bb"}"#,
+        )
+        .unwrap();
+        assert!(matches!(unwrap_password(&keystore), Err(TouchIdError::InvalidHex(_))));
     }
 
     #[test]
@@ -444,7 +506,7 @@ mod tests {
             Err(e) => panic!("enroll failed: {e}"),
         }
         assert!(is_enrolled(&keystore));
-        assert_eq!(unwrap_password(&keystore).unwrap(), "hunter2");
+        assert_eq!(*unwrap_password(&keystore).unwrap(), "hunter2");
 
         assert!(remove(&keystore).unwrap());
         assert!(!is_enrolled(&keystore));
@@ -473,6 +535,6 @@ mod tests {
         let keystore = dir.path().join("deployer");
         fs::write(&keystore, "{}").unwrap();
         enroll(&keystore, "hunter2", Policy::UserPresence).unwrap();
-        assert_eq!(unwrap_password(&keystore).unwrap(), "hunter2");
+        assert_eq!(*unwrap_password(&keystore).unwrap(), "hunter2");
     }
 }
