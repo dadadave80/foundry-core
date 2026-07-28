@@ -137,8 +137,11 @@ private func preauthenticate(_ context: LAContext, policy: Int32, reason: String
 
     var check: NSError?
     guard context.canEvaluatePolicy(laPolicy, error: &check) else {
-        let message = check?.localizedDescription ?? "authentication is not available"
-        throw ShimError(status: statusUnavailable, message: message)
+        guard let check else {
+            throw ShimError(
+                status: statusFailure, message: "policy evaluation failed without an error")
+        }
+        throw classify(check)
     }
 
     let done = DispatchSemaphore(value: 0)

@@ -2,6 +2,9 @@ use std::{env, path::PathBuf, process::Command};
 
 const XCODE_HINT: &str = "the touch-id feature requires the Xcode command line tools";
 
+/// Oldest macOS release supported by the CryptoKit APIs used by the Swift shim.
+const MIN_MACOS: (u32, u32) = (11, 0);
+
 /// Oldest Swift toolchain the shim is known to link with, kept honest by the
 /// oldest-supported leg of the `touch-id-link` CI job. Swift 5.9
 /// ships with Xcode / Command Line Tools 15.0.1.
@@ -27,10 +30,7 @@ fn main() {
         "aarch64" => "arm64".to_string(),
         arch => arch.to_string(),
     };
-    // Honor the standard deployment-target override, like the `cc` crate does.
-    // CryptoKit's Secure Enclave and HKDF APIs need macOS 11; swiftc rejects
-    // older values with clear availability errors.
-    let deployment = env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "11".to_string());
+    let deployment = macos_deployment_target();
 
     let object = out_dir.join("foundry_se.o");
     run(Command::new("swiftc")
@@ -64,6 +64,31 @@ fn main() {
     println!("cargo::rustc-link-search=native={path}/macosx");
 }
 
+/// Uses rustc's effective target as the source of truth so the final Rust
+/// binary and the Swift object cannot silently advertise different macOS
+/// version floors.
+fn macos_deployment_target() -> String {
+    let rustc = env::var_os("RUSTC").expect("Cargo did not provide RUSTC");
+    let target = env::var("TARGET").expect("Cargo did not provide TARGET");
+    let out =
+        run_stdout(Command::new(rustc).args(["--print", "deployment-target", "--target", &target]));
+    let deployment = out
+        .trim()
+        .strip_prefix("MACOSX_DEPLOYMENT_TARGET=")
+        .expect("unexpected `rustc --print deployment-target` output");
+    assert!(
+        major_minor(deployment) >= MIN_MACOS,
+        "the touch-id feature requires a macOS deployment target of {}.{} or newer; \
+         rustc selected {deployment} for {target}. Set MACOSX_DEPLOYMENT_TARGET={}.{} \
+         when building with `--features touch-id`",
+        MIN_MACOS.0,
+        MIN_MACOS.1,
+        MIN_MACOS.0,
+        MIN_MACOS.1,
+    );
+    deployment.to_string()
+}
+
 /// Rejects toolchains older than [`MIN_SWIFT`] before compiling anything,
 /// turning an opaque failure inside Apple `ld` into an actionable error.
 /// Gated on `swiftc` rather than `xcodebuild` because Command Line Tools-only
@@ -78,8 +103,7 @@ fn check_swift_version() {
         "could not parse `swiftc --version` output ({}); {XCODE_HINT}",
         out.trim()
     );
-    let mut parts = ver.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
-    let found = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    let found = major_minor(ver);
     assert!(
         found >= MIN_SWIFT,
         "the touch-id feature requires Swift {}.{} or newer (Xcode/Command Line Tools \
@@ -88,6 +112,11 @@ fn check_swift_version() {
         MIN_SWIFT.0,
         MIN_SWIFT.1,
     );
+}
+
+fn major_minor(ver: &str) -> (u32, u32) {
+    let mut parts = ver.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+    (parts.next().unwrap_or(0), parts.next().unwrap_or(0))
 }
 
 fn run(cmd: &mut Command) {
