@@ -149,7 +149,7 @@ impl TouchIdError {
 }
 
 /// Sidecar file contents: the enclave key and the password it wraps.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Sidecar {
     version: u32,
     policy: Policy,
@@ -374,6 +374,56 @@ mod tests {
     fn lockout_and_password_mismatch_do_not_fall_back() {
         assert!(!TouchIdError::LockedOut("locked".into()).is_recoverable());
         assert!(!TouchIdError::PasswordMismatch.is_recoverable());
+    }
+
+    #[test]
+    fn policy_wire_format_is_stable() {
+        assert_eq!(serde_json::to_string(&Policy::UserPresence).unwrap(), "\"user-presence\"");
+        assert_eq!(
+            serde_json::to_string(&Policy::CurrentBiometry).unwrap(),
+            "\"current-biometry\""
+        );
+        assert_eq!(
+            serde_json::from_str::<Policy>("\"user-presence\"").unwrap(),
+            Policy::UserPresence
+        );
+    }
+
+    /// The sidecar is a persistent on-disk format; lock its field names and
+    /// order against accidental rename refactors.
+    #[test]
+    fn sidecar_wire_format_is_stable() {
+        let sidecar = Sidecar {
+            version: SIDECAR_VERSION,
+            policy: Policy::UserPresence,
+            se_key: "aa".into(),
+            sealed_password: "bb".into(),
+        };
+        let json = serde_json::to_string(&sidecar).unwrap();
+        assert_eq!(
+            json,
+            r#"{"version":1,"policy":"user-presence","se_key":"aa","sealed_password":"bb"}"#
+        );
+        assert_eq!(serde_json::from_str::<Sidecar>(&json).unwrap(), sidecar);
+    }
+
+    /// Corrupt sidecars must surface structured errors without touching the
+    /// enclave, so these paths are testable on any machine.
+    #[test]
+    fn corrupt_sidecars_report_structured_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let keystore = dir.path().join("k");
+        fs::write(&keystore, "{}").unwrap();
+
+        fs::write(sidecar_path(&keystore), "not json").unwrap();
+        assert!(matches!(unwrap_password(&keystore), Err(TouchIdError::InvalidSidecar(_))));
+
+        fs::write(
+            sidecar_path(&keystore),
+            r#"{"version":1,"policy":"user-presence","se_key":"zz","sealed_password":"bb"}"#,
+        )
+        .unwrap();
+        assert!(matches!(unwrap_password(&keystore), Err(TouchIdError::InvalidHex(_))));
     }
 
     #[test]
