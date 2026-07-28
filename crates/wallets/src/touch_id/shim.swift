@@ -35,6 +35,7 @@ private let statusCanceled: Int32 = 2
 private let statusUnavailable: Int32 = 3
 private let statusInvalidated: Int32 = 4
 private let statusInvalidData: Int32 = 5
+private let statusLockedOut: Int32 = 6
 
 // Access-control policies shared with `Policy::raw` in `mod.rs`.
 private let policyDeviceOnly: Int32 = 0
@@ -99,8 +100,9 @@ private func classify(_ error: Error) -> ShimError {
         switch code {
         case .userCancel, .appCancel, .systemCancel:
             return ShimError(status: statusCanceled, message: "authentication was canceled")
-        case .passcodeNotSet, .biometryNotAvailable, .biometryNotEnrolled, .biometryLockout,
-            .notInteractive:
+        case .biometryLockout:
+            return ShimError(status: statusLockedOut, message: ns.localizedDescription)
+        case .passcodeNotSet, .biometryNotAvailable, .biometryNotEnrolled, .notInteractive:
             return ShimError(status: statusUnavailable, message: ns.localizedDescription)
         default: break
         }

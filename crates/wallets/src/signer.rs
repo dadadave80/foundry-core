@@ -355,28 +355,21 @@ pub enum PendingSigner {
 impl PendingSigner {
     pub fn unlock(self) -> Result<WalletSigner> {
         match self {
-            Self::Keystore(path, _) => {
+            Self::Keystore(path, expected_address) => {
                 // Falling back to the password prompt is reserved for recoverable
-                // situations — a headless session, or a wrapped password made stale
-                // by a keystore password change — and is always announced on
-                // stderr. Everything else aborts: a canceled Touch ID prompt must
-                // not degrade into a password prompt, and a corrupt or invalidated
-                // sidecar needs an explicit re-enroll/remove decision rather than
-                // a downgrade an attacker could induce.
+                // environmental failures and is always announced on stderr.
+                // Cancellation, corruption, invalidation, and a password mismatch
+                // require an explicit re-enroll/remove decision.
                 #[cfg(all(target_os = "macos", feature = "touch-id"))]
                 if crate::touch_id::is_enrolled(&path) {
                     match crate::touch_id::unwrap_password(&path) {
                         Ok(password) => match PrivateKeySigner::decrypt_keystore(&path, password) {
-                            Ok(signer) => return Ok(WalletSigner::Local(signer)),
-                            // Stale wrap: the keystore password changed after
-                            // enrollment, so the prompt can still succeed.
+                            Ok(signer) => return checked_keystore_signer(signer, expected_address),
                             Err(alloy_signer_local::LocalSignerError::EthKeystoreError(
                                 eth_keystore::KeystoreError::MacMismatch,
-                            )) => eprintln!(
-                                "Warning: the Touch ID-stored password no longer decrypts \
-                                     this keystore (was the password changed?); falling back to \
-                                     the password prompt. Re-enroll to refresh it."
-                            ),
+                            )) => {
+                                return Err(crate::touch_id::TouchIdError::PasswordMismatch.into());
+                            }
                             Err(e) => return Err(WalletSignerError::Local(e)),
                         },
                         Err(e) if e.is_recoverable() => {
@@ -387,7 +380,7 @@ impl PendingSigner {
                 }
                 let password = rpassword::prompt_password("Enter keystore password:")?;
                 match PrivateKeySigner::decrypt_keystore(path, password) {
-                    Ok(signer) => Ok(WalletSigner::Local(signer)),
+                    Ok(signer) => checked_keystore_signer(signer, expected_address),
                     Err(e) => match e {
                         // Catch the `MacMismatch` error, which indicates an incorrect password and
                         // return a more user-friendly `IncorrectKeystorePassword`.
@@ -403,5 +396,37 @@ impl PendingSigner {
                 Ok(WalletSigner::from_private_key(&hex::FromHex::from_hex(private_key)?)?)
             }
         }
+    }
+}
+
+fn checked_keystore_signer(
+    signer: PrivateKeySigner,
+    expected_address: Option<Address>,
+) -> Result<WalletSigner> {
+    let actual = signer.address();
+    if let Some(expected) = expected_address
+        && actual != expected
+    {
+        return Err(WalletSignerError::KeystoreAddressMismatch { expected, actual });
+    }
+    Ok(WalletSigner::Local(signer))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_keystore_signer_with_unexpected_address() {
+        let signer = PrivateKeySigner::from_bytes(&B256::from([1_u8; 32])).unwrap();
+        let actual = signer.address();
+
+        assert!(matches!(
+            checked_keystore_signer(signer, Some(Address::ZERO)),
+            Err(WalletSignerError::KeystoreAddressMismatch {
+                expected: Address::ZERO,
+                actual: returned,
+            }) if returned == actual
+        ));
     }
 }

@@ -1,4 +1,4 @@
-use alloy_primitives::hex::FromHexError;
+use alloy_primitives::{Address, hex::FromHexError};
 use alloy_signer::k256::ecdsa;
 use alloy_signer_ledger::LedgerError;
 use alloy_signer_local::LocalSignerError;
@@ -38,6 +38,8 @@ pub enum WalletSignerError {
     Local(#[from] LocalSignerError),
     #[error("Failed to decrypt keystore: incorrect password")]
     IncorrectKeystorePassword,
+    #[error("decrypted keystore address mismatch: expected {expected}, got {actual}")]
+    KeystoreAddressMismatch { expected: Address, actual: Address },
     #[error(transparent)]
     Ledger(#[from] LedgerError),
     #[error(

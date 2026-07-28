@@ -91,6 +91,9 @@ pub enum TouchIdError {
     /// Secure Enclave, no enrolled biometrics or passcode).
     #[error("Touch ID authentication is unavailable: {0}")]
     Unavailable(String),
+    /// Current biometric authentication is temporarily locked out.
+    #[error("Touch ID authentication is locked out: {0}")]
+    LockedOut(String),
     /// Authentication succeeded but the enclave rejected the wrap key: the
     /// enrollment no longer matches this device's state (e.g. a
     /// [`Policy::CurrentBiometry`] key after biometric re-enrollment).
@@ -106,6 +109,11 @@ pub enum TouchIdError {
          sidecar to use the password prompt"
     )]
     CorruptSidecar(String),
+    #[error(
+        "the Touch ID-stored password does not match this keystore; re-enroll this keystore, \
+         or delete its `.touchid` sidecar to use the password prompt"
+    )]
+    PasswordMismatch,
     #[error("Secure Enclave: {0}")]
     SecureEnclave(String),
     #[error(transparent)]
@@ -179,6 +187,7 @@ mod status {
     pub(super) const UNAVAILABLE: i32 = 3;
     pub(super) const INVALIDATED: i32 = 4;
     pub(super) const INVALID_DATA: i32 = 5;
+    pub(super) const LOCKED_OUT: i32 = 6;
 }
 
 /// Copies out a shim result buffer, frees it, and interprets it as data or an
@@ -209,6 +218,7 @@ unsafe fn shim_result(status: i32, ptr: *mut u8, len: usize) -> Result<Vec<u8>, 
         status::UNAVAILABLE => TouchIdError::Unavailable(message),
         status::INVALIDATED => TouchIdError::Invalidated(message),
         status::INVALID_DATA => TouchIdError::CorruptSidecar(message),
+        status::LOCKED_OUT => TouchIdError::LockedOut(message),
         _ => TouchIdError::SecureEnclave(message),
     })
 }
@@ -347,6 +357,12 @@ pub fn remove(keystore: &Path) -> Result<bool, TouchIdError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lockout_and_password_mismatch_do_not_fall_back() {
+        assert!(!TouchIdError::LockedOut("locked".into()).is_recoverable());
+        assert!(!TouchIdError::PasswordMismatch.is_recoverable());
+    }
 
     #[test]
     fn sidecar_path_appends_extension() {
