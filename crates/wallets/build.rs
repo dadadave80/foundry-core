@@ -34,7 +34,10 @@ fn main() {
 
     let object = out_dir.join("foundry_se.o");
     run(Command::new("swiftc")
-        .args(["-emit-object", "-parse-as-library", "-O"])
+        // Freeze the language mode: the shim's reply-handler capture is valid
+        // Swift 5 but rejected under Swift 6 strict concurrency, and bare
+        // `swiftc` inherits the toolchain default.
+        .args(["-emit-object", "-parse-as-library", "-O", "-swift-version", "5"])
         .args(["-target", &format!("{arch}-apple-macos{deployment}")])
         .arg("src/touch_id/shim.swift")
         .arg("-o")
