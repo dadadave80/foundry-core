@@ -44,6 +44,7 @@ const SIDECAR_VERSION: u32 = 1;
 // kebab-case so the persisted values match a future clap `ValueEnum` policy flag.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum Policy {
     /// Touch ID, with device password fallback.
     #[default]
@@ -77,6 +78,7 @@ impl Policy {
 /// variant is either an explicit user decision ([`TouchIdError::Canceled`]) or
 /// a sidecar that must be re-enrolled or removed before unlocking proceeds.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum TouchIdError {
     #[error("keystore is not enrolled for Touch ID unlock")]
     NotEnrolled,
@@ -117,8 +119,8 @@ pub enum TouchIdError {
     PasswordMismatch,
     #[error("Secure Enclave: {0}")]
     SecureEnclave(String),
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
+    #[error("failed to access the Touch ID sidecar at `{path}`: {source}")]
+    SidecarIo { path: PathBuf, source: std::io::Error },
     #[error(
         "invalid Touch ID sidecar: {0}; re-enroll this keystore, or delete its `.touchid` \
          sidecar to use the password prompt"
@@ -246,7 +248,9 @@ pub fn is_enrolled(keystore: &Path) -> bool {
 /// Enrolls a keystore: creates a Secure Enclave wrap key under `policy` and stores
 /// the wrapped `password` in the sidecar file, replacing any existing sidecar (the
 /// previous wrap key and its policy are discarded). The caller is responsible for
-/// having verified that `password` decrypts the keystore.
+/// having verified that `password` decrypts the keystore: unlocking treats a
+/// wrapped password that fails to decrypt as tampering and aborts with
+/// [`TouchIdError::PasswordMismatch`] instead of falling back to the prompt.
 pub fn enroll(keystore: &Path, password: &str, policy: Policy) -> Result<(), TouchIdError> {
     let (mut ptr, mut len) = (std::ptr::null_mut(), 0);
     // SAFETY: the out parameters are valid for writes.
@@ -276,6 +280,7 @@ pub fn enroll(keystore: &Path, password: &str, policy: Policy) -> Result<(), Tou
         sealed_password: hex::encode(sealed_password),
     };
     write_sidecar(keystore, &sidecar)
+        .map_err(|source| TouchIdError::SidecarIo { path: sidecar_path(keystore), source })
 }
 
 /// Serializes `sidecar` and atomically replaces the keystore's sidecar file.
@@ -287,7 +292,7 @@ pub fn enroll(keystore: &Path, password: &str, policy: Policy) -> Result<(), Tou
 /// itself. It also means a crash can never leave a truncated sidecar behind,
 /// and that re-enrollment repairs loosened file permissions, since the fresh
 /// file's `0600` travels with the rename.
-fn write_sidecar(keystore: &Path, sidecar: &Sidecar) -> Result<(), TouchIdError> {
+fn write_sidecar(keystore: &Path, sidecar: &Sidecar) -> std::io::Result<()> {
     let path = sidecar_path(keystore);
     let dir = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
@@ -312,7 +317,8 @@ pub fn unwrap_password(keystore: &Path) -> Result<Zeroizing<String>, TouchIdErro
     if !path.exists() {
         return Err(TouchIdError::NotEnrolled);
     }
-    let raw = fs::read_to_string(path)?;
+    let raw =
+        fs::read_to_string(&path).map_err(|source| TouchIdError::SidecarIo { path, source })?;
     // Gate on the version before parsing the full schema, so a future format's
     // sidecar reports its version instead of a schema mismatch.
     #[derive(Deserialize)]
@@ -353,7 +359,7 @@ pub fn unwrap_password(keystore: &Path) -> Result<Zeroizing<String>, TouchIdErro
 pub fn remove(keystore: &Path) -> Result<bool, TouchIdError> {
     let path = sidecar_path(keystore);
     if path.exists() {
-        fs::remove_file(path)?;
+        fs::remove_file(&path).map_err(|source| TouchIdError::SidecarIo { path, source })?;
         Ok(true)
     } else {
         Ok(false)
