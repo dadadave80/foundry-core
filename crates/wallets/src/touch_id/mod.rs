@@ -245,12 +245,6 @@ pub fn is_enrolled(keystore: &Path) -> bool {
     sidecar_path(keystore).exists()
 }
 
-/// Returns the access-control policy stored in the keystore's Touch ID sidecar.
-#[inline]
-pub fn policy(keystore: &Path) -> Result<Policy, TouchIdError> {
-    Ok(read_sidecar(keystore)?.policy)
-}
-
 /// Enrolls a keystore: creates a Secure Enclave wrap key under `policy` and stores
 /// the wrapped `password` in the sidecar file, replacing any existing sidecar (the
 /// previous wrap key and its policy are discarded). The caller is responsible for
@@ -417,21 +411,6 @@ mod tests {
         assert_eq!(serde_json::from_str::<Sidecar>(&json).unwrap(), sidecar);
     }
 
-    #[test]
-    fn reads_enrollment_policy() {
-        let dir = tempfile::tempdir().unwrap();
-        let keystore = dir.path().join("deployer");
-        let sidecar = Sidecar {
-            version: SIDECAR_VERSION,
-            policy: Policy::CurrentBiometry,
-            se_key: "aa".into(),
-            sealed_password: "bb".into(),
-        };
-        write_sidecar(&keystore, &sidecar).unwrap();
-
-        assert_eq!(policy(&keystore).unwrap(), Policy::CurrentBiometry);
-    }
-
     /// Corrupt sidecars must surface structured errors without touching the
     /// enclave, so these paths are testable on any machine.
     #[test]
@@ -549,7 +528,6 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(unwrap_password(&keystore), Err(TouchIdError::UnsupportedVersion(2))));
-        assert!(matches!(policy(&keystore), Err(TouchIdError::UnsupportedVersion(2))));
     }
 
     /// Requires a Touch ID prompt; run manually:
