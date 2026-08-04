@@ -245,7 +245,7 @@ pub fn is_enrolled(keystore: &Path) -> bool {
     sidecar_path(keystore).exists()
 }
 
-/// Returns the access-control policy stored in the keystore's Touch ID sidecar.
+/// Reads the access-control policy stored in the keystore's Touch ID sidecar.
 pub fn policy(keystore: &Path) -> Result<Policy, TouchIdError> {
     Ok(read_sidecar(keystore)?.policy)
 }
